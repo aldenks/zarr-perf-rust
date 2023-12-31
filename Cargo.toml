@@ -1,0 +1,16 @@
+[package]
+name = "zarr-perf-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blosc2-src = { version = "0.1.3", features = ["zstd"] }
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+itertools = { version = "0.12" }
+futures = { version = "0.3" }
+bytes = { version = "1" }
+
+[profile.release]
+strip = true    # Automatically strip symbols from the binary.
+opt-level = "s" # Optimize for size.
