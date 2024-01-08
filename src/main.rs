@@ -7,7 +7,7 @@ const ZARR_URL: &str = "https://zarr.world/hrrr-analysis-TMPonly-2023-06-chunks3
 async fn main() -> Result<(), reqwest::Error> {
     let original_client = reqwest::Client::new();
 
-    let futures = iproduct!(0..2, 0..4, 0..5).map(|(x, y, z)| {
+    let futures = iproduct!(0..2, 0..5, 0..8).map(|(x, y, z)| {
         let client = original_client.clone(); // clone a copy which can be `move`d into future
 
         async move {
@@ -27,7 +27,7 @@ async fn main() -> Result<(), reqwest::Error> {
     });
 
     let results = futures::stream::iter(futures)
-        .buffer_unordered(10) // max 10 concurrent requests
+        .buffer_unordered(1000) // max n concurrent requests
         .collect::<Vec<_>>() // collect results into a vector
         .await;
 
