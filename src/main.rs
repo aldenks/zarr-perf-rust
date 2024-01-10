@@ -2,8 +2,11 @@ use std::error::Error;
 use std::ffi::c_void;
 
 use blosc2_src::{
-    blosc2_create_dctx, blosc2_decompress_ctx, blosc2_free_ctx, BLOSC2_DPARAMS_DEFAULTS,
+    blosc1_cbuffer_sizes, blosc2_create_dctx, blosc2_decompress_ctx, blosc2_free_ctx,
+    BLOSC2_DPARAMS_DEFAULTS,
 };
+use half::f16;
+use half::slice::HalfBitsSliceExt;
 // use futures::stream::StreamExt;
 // use itertools::iproduct;
 
@@ -15,34 +18,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let compressed_chunk_bytes = get_chunk_bytes(original_client.clone(), 1, 1, 1).await?;
 
-    // TODO use blosc1_cbuffer_sizes to get # of decompressed bytes to allocate https://www.blosc.org/c-blosc2/reference/blosc1.html#blosc2_8h_1a892258a6289fffd86744dbb70491517f
-    let mut decompressed_chunk_bytes = vec![0_u8; 100000000];
+    let decompressed_chunk_bytes = unsafe {
+        // Get size of decompressed data
+        let mut decompressed_len: usize = 0;
+        let mut compressed_len: usize = 0;
+        let mut blosc_block_len: usize = 0;
+        blosc1_cbuffer_sizes(
+            compressed_chunk_bytes.as_ptr() as *const c_void,
+            // These 3 values are "returned" by this function
+            &mut decompressed_len,
+            &mut compressed_len,
+            &mut blosc_block_len,
+        );
 
-    unsafe {
-        let dparams = BLOSC2_DPARAMS_DEFAULTS;
-        let decompress_context = blosc2_create_dctx(dparams);
-        dbg!(dparams);
-        dbg!(decompress_context);
-        dbg!(compressed_chunk_bytes.len());
-        dbg!(decompressed_chunk_bytes.len());
+        // Allocate buffer to decompress into
+        let decompressed_chunk_bytes = vec![0_u8; decompressed_len];
 
-        let num_bytes_decompressed = blosc2_decompress_ctx(
+        let decompress_context = blosc2_create_dctx(BLOSC2_DPARAMS_DEFAULTS);
+        let decompressed_len_or_err_code = blosc2_decompress_ctx(
             decompress_context,
             compressed_chunk_bytes.as_ptr() as *const c_void,
             compressed_chunk_bytes.len().try_into()?,
             decompressed_chunk_bytes.as_ptr() as *mut c_void,
             decompressed_chunk_bytes.len().try_into()?,
         );
-
-        // Don't need this once we allocate exactly as much as we need
-        decompressed_chunk_bytes.truncate(num_bytes_decompressed.try_into()?);
-
-        // TODO now re-interpret these bytes as float16s
-
-        dbg!(num_bytes_decompressed);
-
+        if decompressed_len_or_err_code != i32::try_from(decompressed_len)? {
+            return Err(format!("Decompression error {}", decompressed_len_or_err_code).into());
+        } else {
+            let decompressed_mb = decompressed_len_or_err_code as f64 / (1000 * 1000) as f64;
+            let compressed_mb = compressed_len as f64 / (1000 * 1000) as f64;
+            println!(
+                "Decompressed to {:.1}mb from {:.1}mb ({:.1}x compression)",
+                decompressed_mb,
+                compressed_mb,
+                decompressed_mb / compressed_mb
+            )
+        }
         blosc2_free_ctx(decompress_context);
-    }
+
+        decompressed_chunk_bytes
+    };
+
+    let decompressed_chunk_u16: &[u16] = unsafe {
+        std::slice::from_raw_parts(
+            decompressed_chunk_bytes.as_ptr() as *const u16,
+            decompressed_chunk_bytes.len() / 2,
+        )
+    };
+    let chunk_values: &[f16] = decompressed_chunk_u16.reinterpret_cast();
+
+    let chunk_sum = chunk_values
+        .iter()
+        .cloned()
+        .fold(0 as f64, |sum, x| sum + f64::from(x));
+    let chunk_mean = chunk_sum / chunk_values.len() as f64;
+    dbg!(chunk_mean);
 
     return Ok(());
 
