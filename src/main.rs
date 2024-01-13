@@ -6,7 +6,6 @@ use blosc2_src::{
     BLOSC2_DPARAMS_DEFAULTS,
 };
 use half::f16;
-use half::slice::HalfBitsSliceExt;
 // use futures::stream::StreamExt;
 // use itertools::iproduct;
 
@@ -16,56 +15,9 @@ const ZARR_URL: &str = "https://zarr.world/hrrr-analysis-TMPonly-2023-06-chunks3
 async fn main() -> Result<(), Box<dyn Error>> {
     let original_client = reqwest::Client::new();
 
-    let compressed_chunk_bytes = get_chunk_bytes(original_client.clone(), 1, 1, 1).await?;
+    let compressed_bytes = get_chunk_bytes(original_client.clone(), 1, 1, 1).await?;
 
-    let decompressed_chunk_bytes = unsafe {
-        // Get size of decompressed data
-        let mut decompressed_len: usize = 0;
-        let mut compressed_len: usize = 0;
-        let mut blosc_block_len: usize = 0;
-        blosc1_cbuffer_sizes(
-            compressed_chunk_bytes.as_ptr() as *const c_void,
-            // These 3 values are "returned" by this function
-            &mut decompressed_len,
-            &mut compressed_len,
-            &mut blosc_block_len,
-        );
-
-        // Allocate buffer to decompress into
-        let decompressed_chunk_bytes = vec![0_u8; decompressed_len];
-
-        let decompress_context = blosc2_create_dctx(BLOSC2_DPARAMS_DEFAULTS);
-        let decompressed_len_or_err_code = blosc2_decompress_ctx(
-            decompress_context,
-            compressed_chunk_bytes.as_ptr() as *const c_void,
-            compressed_chunk_bytes.len().try_into()?,
-            decompressed_chunk_bytes.as_ptr() as *mut c_void,
-            decompressed_chunk_bytes.len().try_into()?,
-        );
-        if decompressed_len_or_err_code != i32::try_from(decompressed_len)? {
-            return Err(format!("Decompression error {}", decompressed_len_or_err_code).into());
-        } else {
-            let decompressed_mb = decompressed_len_or_err_code as f64 / (1000 * 1000) as f64;
-            let compressed_mb = compressed_len as f64 / (1000 * 1000) as f64;
-            println!(
-                "Decompressed to {:.1}mb from {:.1}mb ({:.1}x compression)",
-                decompressed_mb,
-                compressed_mb,
-                decompressed_mb / compressed_mb
-            )
-        }
-        blosc2_free_ctx(decompress_context);
-
-        decompressed_chunk_bytes
-    };
-
-    let decompressed_chunk_u16: &[u16] = unsafe {
-        std::slice::from_raw_parts(
-            decompressed_chunk_bytes.as_ptr() as *const u16,
-            decompressed_chunk_bytes.len() / 2,
-        )
-    };
-    let chunk_values: &[f16] = decompressed_chunk_u16.reinterpret_cast();
+    let chunk_values = decompress_chunk(&compressed_bytes)?;
 
     let chunk_sum = chunk_values
         .iter()
@@ -89,6 +41,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // dbg!(results.len());
 
     // Ok(())
+}
+
+fn decompress_chunk(compressed_bytes: &bytes::Bytes) -> Result<Vec<f16>, Box<dyn Error>> {
+    let (decompressed_len, compressed_len, _) = blosc_buffer_sizes(compressed_bytes);
+
+    // Allocate buffer to decompress into
+    let value_size = std::mem::size_of::<f16>();
+    let values = vec![f16::NAN; decompressed_len / value_size];
+
+    let actual_decompressed_len_or_err_code = unsafe {
+        let decompress_context = blosc2_create_dctx(BLOSC2_DPARAMS_DEFAULTS);
+        let actual_decompressed_len_or_err_code = blosc2_decompress_ctx(
+            decompress_context,
+            compressed_bytes.as_ptr() as *const c_void,
+            compressed_bytes.len().try_into()?,
+            values.as_ptr() as *mut c_void,
+            (values.len() * value_size).try_into()?,
+        );
+        blosc2_free_ctx(decompress_context);
+        actual_decompressed_len_or_err_code
+    };
+
+    if actual_decompressed_len_or_err_code != i32::try_from(decompressed_len)? {
+        return Err(format!(
+            "Decompression error code {}",
+            actual_decompressed_len_or_err_code
+        )
+        .into());
+    } else {
+        let decompressed_mb = decompressed_len as f64 / (1000 * 1000) as f64;
+        let compressed_mb = compressed_len as f64 / (1000 * 1000) as f64;
+        println!(
+            "Decompressed to {:.1}mb from {:.1}mb ({:.1}x compression)",
+            decompressed_mb,
+            compressed_mb,
+            decompressed_mb / compressed_mb
+        )
+    }
+
+    Ok(values)
+}
+
+fn blosc_buffer_sizes(compressed_bytes: &bytes::Bytes) -> (usize, usize, usize) {
+    let (mut decompressed_len, mut compressed_len, mut blosc_block_len) = (0, 0, 0);
+    unsafe {
+        blosc1_cbuffer_sizes(
+            compressed_bytes.as_ptr() as *const c_void,
+            // These 3 values are "returned" by this function
+            &mut decompressed_len,
+            &mut compressed_len,
+            &mut blosc_block_len,
+        );
+    }
+    (decompressed_len, compressed_len, blosc_block_len)
 }
 
 async fn get_chunk_bytes(
