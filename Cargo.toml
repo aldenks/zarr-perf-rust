@@ -10,7 +10,9 @@ tokio = { version = "1", features = ["full"] }
 itertools = { version = "0.12" }
 futures = { version = "0.3" }
 bytes = { version = "1" }
+half = { version = "2" }
 
 [profile.release]
-strip = true    # Automatically strip symbols from the binary.
-opt-level = "s" # Optimize for size.
+strip = true # Automatically strip symbols from the binary.
+# opt-level = "s" # Optimize for size.
+opt-level = 3
